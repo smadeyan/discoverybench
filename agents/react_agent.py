@@ -1,4 +1,4 @@
-from agents.react_utils import create_agent
+from agents.react_utils import create_agent, NotebookCallbackHandler
 from langchain_anthropic import ChatAnthropic
 from langchain_together import Together
 from langchain_openai import ChatOpenAI
@@ -9,6 +9,8 @@ import langchain
 from langchain_core.callbacks import FileCallbackHandler, StdOutCallbackHandler
 from utils.dv_log import DVLogger
 import uuid
+import nbformat
+from nbformat.v4 import new_notebook, new_code_cell
 
 
 # uncomment the following line to enable debug mode
@@ -33,6 +35,7 @@ class ReactAgent():
         api_config: str = None,
         model_name: str = "gpt-4-1106-preview",
         log_file: str = "output.log",
+        use_reflection: bool = False,
         max_iterations: int = 25
     ):
         self.logfile = log_file
@@ -40,6 +43,8 @@ class ReactAgent():
         # logger.add(log_file, format="{time} {level} {message}", level="INFO")
         self.file_handler = FileCallbackHandler(self.logfile)
         self.stdout_handler = StdOutCallbackHandler()
+        self.notebook_handler = NotebookCallbackHandler()
+        self.use_reflection = use_reflection
 
         # set max iterations
         self.max_iterations = max_iterations
@@ -77,6 +82,7 @@ class ReactAgent():
         try:
             # get api key using model type
             self.api_key = self.api_config[self.model_type]
+            print(self.api_key)
         except KeyError:
             raise ValueError(f"API key not found for {self.model_type}")
 
@@ -90,8 +96,10 @@ class ReactAgent():
         # create agent
         self.agent = create_agent(
             llm=self.llm,
-            handlers=[self.file_handler, self.stdout_handler],
-            max_iterations=self.max_iterations
+            handlers=[self.file_handler, self.stdout_handler, self.notebook_handler],
+            # handlers=[self.file_handler, self.stdout_handler],
+            max_iterations=self.max_iterations,
+            use_reflection=use_reflection
         )
 
     def get_model(
@@ -120,18 +128,35 @@ class ReactAgent():
                 api_key=api_key,
                 **kwargs
             )
+        elif (api == "neulab-openai"):
+            llm = ChatOpenAI(
+                model=model,
+                api_key=api_key,
+                base_url="https://cmu.litellm.ai",
+                **kwargs
+            )
         elif (api == "google"):
             llm = ChatGoogleGenerativeAI(
                 model=model,
                 google_api_key=api_key,
                 **kwargs
             )
+        elif (api == "neulab-together"):
+            llm = Together(
+                model=model,
+                together_api_key=api_key,
+                base_url="https://cmu.litellm.ai/v1/completions",
+                **kwargs
+            )
         else:
             raise ValueError(f"Invalid API: {api}")
         return llm
 
-    def generate(self, dataset_paths, query):
+    def generate(self, dataset_paths, query, notebook_path='random.ipynb'):
+        nb_file_name = os.path.splitext(os.path.basename(self.logfile))[0]
+        notebook_path = os.path.join("gen_nbs", f"{nb_file_name}.ipynb")
         try:
+            print("####Executing")
             output = self.agent.invoke(input={
                 "system_prompt": "You are a discovery agent who can execute a python code only once to answer a query based on one or more datasets. The datasets will be present in the current directory.",
                 "input": f"Load all datasets using python using provided paths. Paths: {dataset_paths}. {query}"
@@ -140,4 +165,9 @@ class ReactAgent():
         except Exception as e:
             print("Execution Stopped due to : ", e)
             self.logger.logger.error(f"Execution Stopped due to : {e}")
+        finally:
+            # Write the collected code snippets to a notebook
+            nb = new_notebook(cells=self.notebook_handler.code_cells)
+            with open(notebook_path, 'w', encoding='utf-8') as f:
+                nbformat.write(nb, f)
         self.logger.close()
